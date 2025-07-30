@@ -18,6 +18,8 @@ VLOG_FILES = \
 	$(RTL_DIR)/control/alu_control.v \
 	$(RTL_DIR)/control/branch_control.v \
 	$(RTL_DIR)/alu/alu_top.v \
+	$(RTL_DIR)/pipeline/id_ex.v \
+	$(RTL_DIR)/pipeline/ex_mem.v \
 
 RISCV_GCC_OPTS = -march=rv32i -mabi=ilp32 -nostdlib
 

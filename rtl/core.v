@@ -29,11 +29,13 @@ always @(posedge clk_i, negedge rstn_i) begin
     end
 end
 
-assign pc_next = id_ex_is_branch && branch_taken ? 
+assign pc_next = id_ex_is_branch && ex_mem_branch_taken ? 
                  id_ex_pc + id_ex_imm : // Branch taken, use PC + immediate
                  pc + 4; // Normal increment
 
 // stage 1: instruction fetch
+// keep this in the top-level because it's a PITA to keep
+// flattening/unflattening the memory in and out of modules
 reg [31:0] if_id_pc;
 reg [31:0] if_id_instr;
 
@@ -48,270 +50,119 @@ always @(posedge clk_i, negedge rstn_i) begin
 end
 
 // stage 2: instruction decode
-reg [31:0] id_ex_pc;
-reg [6:0] id_ex_opcode;
-reg [11:7] id_ex_rd;
-reg [14:12] id_ex_funct3;
-reg [19:15] id_ex_rs1;
-reg [24:20] id_ex_rs2;
-reg [31:25] id_ex_funct7;
-reg [31:0] id_ex_imm, id_ex_imm_next;
+wire [31:0] id_ex_pc;
+wire [6:0] id_ex_opcode;
+wire [11:7] id_ex_rd;
+wire [14:12] id_ex_funct3;
+wire [19:15] id_ex_rs1;
+wire [24:20] id_ex_rs2;
+wire [31:25] id_ex_funct7;
+wire [31:0] id_ex_imm, id_ex_imm_next;
 
 // ALU control signals
 // ALUSrc1 can be rs1 or pc (for JALR/AUIPC/JAL)
-reg id_ex_alu_src1, id_ex_alu_src1_next;
+wire id_ex_alu_src1, id_ex_alu_src1_next;
 // ALUSrc2 can be rs2 or immediate (for I-type, S-type, and B-type)
-reg id_ex_alu_src2, id_ex_alu_src2_next;
+wire id_ex_alu_src2, id_ex_alu_src2_next;
 // ALUOp is a coarse 2-bit control signal for the ALU operation
 // 00 -> load/store, 01 -> branch, 10 -> R-type, 11 -> ALU immediate
-reg [1:0] id_ex_alu_op, id_ex_alu_op_next;
+wire [1:0] id_ex_alu_op, id_ex_alu_op_next;
 
 // Memory and writeback control signals are passed along to MEM and WB 
-reg id_ex_mem_read, id_ex_mem_read_next; 
-reg id_ex_mem_write, id_ex_mem_write_next;
-reg id_ex_mem_to_reg, id_ex_mem_to_reg_next; // Write memory data to register file
-reg id_ex_reg_write, id_ex_reg_write_next; // Write to register file
+wire id_ex_mem_read, id_ex_mem_read_next; 
+wire id_ex_mem_write, id_ex_mem_write_next;
+wire id_ex_mem_to_reg, id_ex_mem_to_reg_next; // Write memory data to register file
+wire id_ex_reg_write, id_ex_reg_write_next; // Write to register file
 
 // Branch control signals
-reg id_ex_is_branch, id_ex_is_branch_next;
+wire id_ex_is_branch, id_ex_is_branch_next;
 
 // register read
 wire [31:0] id_ex_rs1_val, id_ex_rs2_val;
 
-always @(*) begin
-    case (if_id_instr[6:0])
-        7'b0110011: begin // R-type
-            id_ex_imm_next = 0; // no immediate for R-type
-        end
-        7'b0010011,
-        7'b0000011: begin // I-type (load and ALU-immediate)
-            id_ex_imm_next = {{20{if_id_instr[31]}}, if_id_instr[31:20]};
-        end
-        7'b0100011: begin // S-type (store)
-            id_ex_imm_next = {{20{if_id_instr[31]}}, if_id_instr[31:25], if_id_instr[11:7]};
-        end
-        7'b1100011: begin // B-type (branch)
-            id_ex_imm_next = {{19{if_id_instr[31]}}, if_id_instr[31], if_id_instr[7], if_id_instr[30:25], if_id_instr[11:8], 1'b0};
-        end
-        7'b1101111: begin // J-type (jal)
-            id_ex_imm_next = {{12{if_id_instr[31]}}, if_id_instr[19:12], if_id_instr[20], if_id_instr[30:21], 1'b0};
-        end
-        7'b1100111: begin // I-type (jalr)
-            id_ex_imm_next = {{20{if_id_instr[31]}}, if_id_instr[31:20]};
-        end
-        7'b0010111,
-        7'b0110111: begin // U-type (lui)
-            id_ex_imm_next = {if_id_instr[31:12], 12'b0};
-        end
-        default: begin
-            id_ex_imm_next = 0; // default case, should not happen
-        end
-    endcase
-end
-
-// Selects the first ALU operand (ALUSrc1)
-always @(*) begin
-    case (if_id_instr[6:0])
-        7'b1101111, // JAL
-        7'b1100111, // JALR
-        7'b0010111: // AUIPC
-            id_ex_alu_src1_next = 1; // Use PC
-        default:
-            id_ex_alu_src1_next = 0; // Use rs1
-    endcase
-end
-
-// Selects the second ALU operand (ALUSrc2)
-always @(*) begin
-    case (if_id_instr[6:0])
-        7'b0010011, // I-type (ALU-imm)
-        7'b0000011, // I-type (load)
-        7'b1100111, // I-type (jalr)
-        7'b0100011, // S-type (store)
-        7'b0110111, // U-type (lui)
-        7'b0010111: // U-type (auipc)
-            id_ex_alu_src2_next = 1; // Use immediate
-        default:
-            id_ex_alu_src2_next = 0; // Use rs2
-    endcase
-end
-
-// Select the ALU operation (ALUOp)
-always @(*) begin
-    case (if_id_instr[6:0])
-        // These instructions all perform a simple ADD in the main ALU
-        7'b0000011: id_ex_alu_op_next = 2'b00; // Load (rs1 + imm)
-        7'b0100011: id_ex_alu_op_next = 2'b00; // Store (rs1 + imm)
-        7'b0110111: id_ex_alu_op_next = 2'b00; // LUI (0 + imm)
-        7'b0010111: id_ex_alu_op_next = 2'b00; // AUIPC (PC + imm)
-        7'b1101111: id_ex_alu_op_next = 2'b00; // JAL (PC + 4)
-        7'b1100111: id_ex_alu_op_next = 2'b00; // JALR (PC + 4)
-
-        // This is for branch comparisons
-        7'b1100011: id_ex_alu_op_next = 2'b01; // Branch (rs1 - rs2)
-
-        // This requires decoding funct3/funct7
-        7'b0110011: id_ex_alu_op_next = 2'b10; // R-type
-
-        // This requires decoding funct3
-        7'b0010011: id_ex_alu_op_next = 2'b11; // I-type (ALU-imm)
-
-        default:    id_ex_alu_op_next = 2'b00; // Default to ADD
-    endcase
-end
-
-// Branch detection
-always @(*) begin
-    id_ex_is_branch_next = (if_id_instr[6:0] == 7'b1100011);
-end
-
-// Control signals for memory and write-back
-always @(*) begin
-    // Start with defaults for the most common case (R-type/I-type ALU ops)
-    id_ex_mem_read_next   = 1'b0;
-    id_ex_mem_write_next = 1'b0;
-    id_ex_mem_to_reg_next= 1'b0; // Data comes from ALU
-    id_ex_reg_write_next = 1'b1; // Most instructions write to a register
-
-    case (if_id_instr[6:0])
-        7'b0000011: begin // Load
-            id_ex_mem_read_next  = 1'b1;
-            id_ex_mem_to_reg_next= 1'b1; // Data comes from Memory
-        end
-        7'b0100011: begin // Store
-            id_ex_mem_write_next= 1'b1;
-            id_ex_reg_write_next= 1'b0; // Override default: Stores don't write to registers
-        end
-        7'b1100011: begin // Branch
-            id_ex_reg_write_next = 1'b0; // Override default: Branches don't write to registers
-        end
-    endcase
-end
+id_ex id_ex_inst (
+    .clk_i(clk_i),
+    .rstn_i(rstn_i),
+    .pc_i(if_id_pc),
+    .instr_i(if_id_instr),
+    .pc_o(id_ex_pc),
+    .opcode_o(id_ex_opcode),
+    .rd_o(id_ex_rd),
+    .funct3_o(id_ex_funct3),
+    .rs1_o(id_ex_rs1),
+    .rs2_o(id_ex_rs2),
+    .funct7_o(id_ex_funct7),
+    .imm_o(id_ex_imm),
+    .alu_src1_o(id_ex_alu_src1),
+    .alu_src2_o(id_ex_alu_src2),
+    .alu_op_o(id_ex_alu_op),
+    .mem_read_o(id_ex_mem_read),
+    .mem_write_o(id_ex_mem_write),
+    .mem_to_reg_o(id_ex_mem_to_reg),
+    .reg_write_o(id_ex_reg_write),
+    .is_branch_o(id_ex_is_branch)
+);
 
 assign id_ex_rs1_val = id_ex_rs1 == 0 ? 0 : reg_file[id_ex_rs1];
 assign id_ex_rs2_val = id_ex_rs2 == 0 ? 0 : reg_file[id_ex_rs2];
 
-always @(posedge clk_i, negedge rstn_i) begin
-    if (!rstn_i) begin
-        id_ex_pc <= 0;
-        id_ex_opcode <= 0;
-        id_ex_rd <= 0;
-        id_ex_funct3 <= 0;
-        id_ex_rs1 <= 0;
-        id_ex_rs2 <= 0;
-        id_ex_funct7 <= 0;
-        id_ex_imm <= 0;
-        id_ex_alu_src1 <= 0;
-        id_ex_alu_src2 <= 0;
-        id_ex_alu_op <= 0;
-        id_ex_mem_read <= 0;
-        id_ex_mem_write <= 0;
-        id_ex_mem_to_reg <= 0;
-        id_ex_reg_write <= 0;
-        id_ex_is_branch <= 0;
-    end else begin
-        id_ex_pc <= if_id_pc;
-        id_ex_opcode <= if_id_instr[6:0];
-        id_ex_rd <= if_id_instr[11:7];
-        id_ex_funct3 <= if_id_instr[14:12];
-        id_ex_rs1 <= if_id_instr[19:15];
-        id_ex_rs2 <= if_id_instr[24:20];
-        id_ex_funct7 <= if_id_instr[31:25];
-        
-        // immediate generation
-        id_ex_imm <= id_ex_imm_next;
-
-        // ALU control signals
-        id_ex_alu_src1 <= id_ex_alu_src1_next;
-        id_ex_alu_src2 <= id_ex_alu_src2_next;
-        id_ex_alu_op <= id_ex_alu_op_next;
-
-        // Memory and write-back control signals
-        id_ex_mem_read <= id_ex_mem_read_next;
-        id_ex_mem_write <= id_ex_mem_write_next;
-        id_ex_mem_to_reg <= id_ex_mem_to_reg_next;
-        id_ex_reg_write <= id_ex_reg_write_next;
-
-        // Branch control signal 
-        id_ex_is_branch <= id_ex_is_branch_next;
-    end
-end
-
 // stage 3: execute
-reg [31:0] ex_mem_pc;
-reg [31:0] ex_mem_out;
-reg ex_mem_branch_taken;
+wire [31:0] ex_mem_pc;
+wire [31:0] ex_mem_out;
+wire ex_mem_branch_taken;
 // RS2 needs to be passed to MEM for store operations
-reg [31:0] ex_mem_rs2_val;
+wire [31:0] ex_mem_rs2_val;
 // RD needs to be passed to WB for write-back
-reg [4:0] ex_mem_rd;
+wire [4:0] ex_mem_rd;
 // forward mem and write-back control signals
-reg ex_mem_mem_read;
-reg ex_mem_mem_write;
-reg ex_mem_mem_to_reg;
-reg ex_mem_reg_write;
-reg ex_mem_funct3;
+wire ex_mem_mem_read;
+wire ex_mem_mem_write;
+wire ex_mem_mem_to_reg;
+wire ex_mem_reg_write;
+wire ex_mem_funct3;
 
 // ALU control and data signals
 wire [3:0] alu_control;
 wire [31:0] alu_result;
 wire alu_zero_flag, alu_carry_flag, alu_sign_flag, alu_overflow_flag;
 
-// generate final control signals for the ALU
-alu_control alu_ctrl_inst (
-    .alu_op(id_ex_alu_op),
-    .funct3(id_ex_funct3),
-    .funct7_bit5(id_ex_funct7[5]),
-    .alu_control(alu_control)
-);
-
-alu_top alu_inst (
-    .instr_i(alu_control),
-    .src1_i(id_ex_alu_src1 ? id_ex_pc : id_ex_rs1_val),
-    .src2_i(id_ex_alu_src2 ? id_ex_imm : id_ex_rs2_val),
-    .result_o(alu_result),
-    .zero_flag_o(alu_zero_flag),
-    .carry_flag_o(alu_carry_flag),
-    .sign_flag_o(alu_sign_flag),
-    .overflow_flag_o(alu_overflow_flag)
-);
-
-wire branch_taken;
-
-branch_control branch_ctrl_inst (
+ex_mem ex_mem_inst (
+    .clk_i(clk_i),
+    .rstn_i(rstn_i),
+    .pc_i(id_ex_pc),
+    .alu_src1_i(id_ex_alu_src1),
+    .alu_src2_i(id_ex_alu_src2),
+    .alu_op_i(id_ex_alu_op),
     .funct3_i(id_ex_funct3),
-    .zero_flag_i(alu_zero_flag),
-    .sign_flag_i(alu_sign_flag),
-    .carry_flag_i(alu_carry_flag),
-    .overflow_flag_i(alu_overflow_flag),
-    .branch_taken_o(branch_taken)
-);
+    .funct7_i(id_ex_funct7),
+    .rs1_val_i(id_ex_rs1_val),
+    .rs2_val_i(id_ex_rs2_val),
+    .imm_i(id_ex_imm),
+    .rd_i(id_ex_rd),
+    .is_branch_i(id_ex_is_branch),
+    .mem_read_i(id_ex_mem_read),
+    .mem_write_i(id_ex_mem_write),
+    .mem_to_reg_i(id_ex_mem_to_reg),
+    .reg_write_i(id_ex_reg_write),
+    
+    // Outputs
+    .pc_o(ex_mem_pc),
+    .rs2_val_o(ex_mem_rs2_val),
+    .rd_o(ex_mem_rd),
+    .mem_read_o(ex_mem_mem_read),
+    .mem_write_o(ex_mem_mem_write),
+    .mem_to_reg_o(ex_mem_mem_to_reg),
+    .reg_write_o(ex_mem_reg_write),
+    .funct3_o(ex_mem_funct3),
 
-always @(posedge clk_i, negedge rstn_i) begin
-    if (!rstn_i) begin
-        ex_mem_pc <= 0;
-        ex_mem_out <= 0;
-        ex_mem_branch_taken <= 0;
-        ex_mem_rs2_val <= 0;
-        ex_mem_rd <= 0;
-        ex_mem_mem_read <= 0;
-        ex_mem_mem_write <= 0;
-        ex_mem_mem_to_reg <= 0;
-        ex_mem_reg_write <= 0;
-        ex_mem_funct3 <= 0;
-    end else begin
-        ex_mem_pc <= id_ex_pc;
-        ex_mem_out <= alu_result;
-        ex_mem_branch_taken <= id_ex_is_branch && branch_taken;
-        ex_mem_rs2_val <= id_ex_rs2_val; // Pass RS2 value for store operations
-        ex_mem_rd <= id_ex_rd;
-        ex_mem_mem_read <= id_ex_mem_read;
-        ex_mem_mem_write <= id_ex_mem_write;
-        ex_mem_mem_to_reg <= id_ex_mem_to_reg;
-        ex_mem_reg_write <= id_ex_reg_write;
-        ex_mem_funct3 <= id_ex_funct3; // Pass funct3 for memory access
-    end 
-end
+    // ALU control and data signals
+    .out_o(ex_mem_out), // ALU result
+    .zero_flag_o(alu_zero_flag), // Zero flag
+    .carry_flag_o(alu_carry_flag), // Carry flag
+    .sign_flag_o(alu_sign_flag), // Sign flag
+    .overflow_flag_o(alu_overflow_flag), // Overflow flag
+    .branch_taken_o(ex_mem_branch_taken) // Branch taken signal
+);
 
 // stage 4: memory access
 reg [31:0] mem_wb_pc;
