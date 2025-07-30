@@ -4,7 +4,7 @@ vertex is a simple 32-bit RISC-V core designed for educational purposes. It is i
 
 ## Microarchitecture
 
-Currently, vertex implements the RV32I base instruction set with a classic 5-stage pipeline. The core currently uses a simple unified memory interface for both instruction and data memory.
+Currently, vertex implements the RV32I base instruction set with a classic 5-stage pipeline. The core uses a simple unified memory interface for both instruction and data memory.
 
 ## Todo-List
 
