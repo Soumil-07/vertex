@@ -8,7 +8,7 @@ Currently, vertex implements the RV32I base instruction set with a classic 5-sta
 
 ## Todo-List
 
-- [ ] Implement hazard detection, forwarding, and stalling
+- [X] Implement hazard detection, forwarding, and stalling
 - [ ] Implement branch flushing to handle control hazards
 - [ ] Implement a more sophisticated memory interface
 - [ ] Add basic exception and interrupt handling

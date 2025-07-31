@@ -9,7 +9,16 @@ reg [31:0] pc;
 wire [31:0] pc_next;
 
 // register file
-reg [31:0] reg_file [31:0];
+reg signed [31:0] reg_file [31:0];
+
+genvar j;
+generate
+    for (j = 0; j < 32; j = j + 1) begin : reg_file_init
+        initial begin
+            reg_file[j] = 0; // Initialize all registers to zero
+        end
+    end
+endgenerate
 
 genvar i;
 generate
@@ -29,8 +38,11 @@ always @(posedge clk_i, negedge rstn_i) begin
     end
 end
 
+wire stall;
+
 assign pc_next = id_ex_is_branch && ex_mem_branch_taken ? 
                  id_ex_pc + id_ex_imm : // Branch taken, use PC + immediate
+                 stall ? pc : // stalled
                  pc + 4; // Normal increment
 
 // stage 1: instruction fetch
@@ -44,8 +56,10 @@ always @(posedge clk_i, negedge rstn_i) begin
         if_id_pc <= 0;
         if_id_instr <= 0;
     end else begin
-        if_id_pc <= pc;
-        if_id_instr <= {data_memory[pc + 3], data_memory[pc + 2], data_memory[pc + 1], data_memory[pc]};
+        if (!stall) begin
+            if_id_pc <= pc;
+            if_id_instr <= {data_memory[pc + 3], data_memory[pc + 2], data_memory[pc + 1], data_memory[pc]};
+        end
     end
 end
 
@@ -80,6 +94,10 @@ wire id_ex_is_branch, id_ex_is_branch_next;
 // register read
 wire [31:0] id_ex_rs1_val, id_ex_rs2_val;
 
+assign stall = id_ex_mem_read 
+                && id_ex_rd != 0 
+                && (id_ex_rd == if_id_instr[19:15] || id_ex_rd == if_id_instr[24:20]);
+
 id_ex id_ex_inst (
     .clk_i(clk_i),
     .rstn_i(rstn_i),
@@ -103,8 +121,33 @@ id_ex id_ex_inst (
     .is_branch_o(id_ex_is_branch)
 );
 
-assign id_ex_rs1_val = id_ex_rs1 == 0 ? 0 : reg_file[id_ex_rs1];
-assign id_ex_rs2_val = id_ex_rs2 == 0 ? 0 : reg_file[id_ex_rs2];
+// EX-MEM to ID-EX forwarding
+wire forward_rs1_exmem;
+wire forward_rs2_exmem;
+
+// MEM-WB to ID-EX forwarding, EX-MEM takes priority
+wire forward_rs1_memwb;
+wire forward_rs2_memwb;
+
+assign forward_rs1_exmem = ex_mem_reg_write
+                        && ex_mem_rd != 0 
+                        && ex_mem_rd == id_ex_rs1;
+assign forward_rs2_exmem = ex_mem_reg_write
+                        && ex_mem_rd != 0 
+                        && ex_mem_rd == id_ex_rs2;
+assign forward_rs1_memwb = mem_wb_reg_write
+                        && mem_wb_rd != 0 
+                        && mem_wb_rd == id_ex_rs1;
+assign forward_rs2_memwb = mem_wb_reg_write
+                        && mem_wb_rd != 0 
+                        && mem_wb_rd == id_ex_rs2;
+
+assign id_ex_rs1_val = id_ex_rs1 == 0 ? 0 : 
+    forward_rs1_exmem ? ex_mem_out :
+    forward_rs1_memwb ? mem_wb_out : reg_file[id_ex_rs1];
+assign id_ex_rs2_val = id_ex_rs2 == 0 ? 0 : 
+    forward_rs2_exmem ? ex_mem_out :
+    forward_rs2_memwb ? mem_wb_out : reg_file[id_ex_rs2];
 
 // stage 3: execute
 wire [31:0] ex_mem_pc;

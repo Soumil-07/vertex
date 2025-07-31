@@ -3,6 +3,7 @@ module id_ex (
                         rstn_i,
     input wire [31:0]   pc_i,
     input wire [31:0]   instr_i,
+    input wire          stall,
 
     output reg [31:0]   pc_o,
     output reg [6:0]    opcode_o,
@@ -157,7 +158,7 @@ end
 
 
 always @(posedge clk_i, negedge rstn_i) begin
-    if (!rstn_i) begin
+    if (!rstn_i || stall) begin
         pc_o          <= 0;
         opcode_o      <= 0;
         rd_o          <= 0;
